@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<title>Glow Garden — Hari 7</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #04140a; overflow: hidden; }
+  canvas { display: block; width: 1080px; height: 1920px; }
+</style>
+</head>
+<body>
+<canvas id="game" width="1080" height="1920"></canvas>
+<script>
+'use strict';
+// Glow Garden — day-seven build (HARI 7).
+// The same tiny game after a week of daily updates: same garden map, same
+// player start, same camera, same scripted patrol — but now the garden is
+// alive. A week of work, visible in one still frame: glowing flowers,
+// twenty-two fireflies with light trails, twinkling stars, a moon, three
+// butterflies, sparkle bursts on every catch, a lantern glow around the
+// bug, and a full HUD (score, combo, level, timer, catches).
+// Playable: WASD / arrow keys, or drag with mouse / touch. When idle the
+// bug follows the same scripted patrol as day one so footage can be
+// captured hands-free.
+
+// --- Seeded RNG (same seed as day one: the first three fireflies start ---
+// --- on exactly the same spots, so the two builds cut together cleanly) ---
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const rng = mulberry32(20261123);
+
+// --- Map (identical to day one: same garden, same start, same camera) -----
+const W = 1080, H = 1920;
+const START = { x: 540, y: 1500 };
+const POND = { x: 850, y: 300, rx: 170, ry: 110 };
+const BEDS = [ { x: 220, y: 520 }, { x: 860, y: 700 }, { x: 300, y: 1150 } ];
+const WAYPOINTS = [
+  { x: 540, y: 1500 }, { x: 300, y: 1100 }, { x: 700, y: 900 },
+  { x: 880, y: 500 }, { x: 400, y: 420 }, { x: 540, y: 1500 },
+  { x: 800, y: 1300 }, { x: 250, y: 800 }
+];
+
+// --- Week-seven dressing, all seeded so every run looks the same ---------
+const STARS = [];
+for (let i = 0; i < 48; i++) {
+  STARS.push({ x: 60 + rng() * 960, y: 60 + rng() * 1150, r: 1.5 + rng() * 2.5, p: rng() * Math.PI * 2, s: 0.6 + rng() * 1.4 });
+}
+const FLOWERS = [];
+const PETALS = ['#ff7ad9', '#ffd166', '#8ecae6', '#ff9770', '#c77dff'];
+for (const b of BEDS) {
+  for (let i = 0; i < 4; i++) {
+    FLOWERS.push({
+      x: b.x - 80 + rng() * 160, y: b.y - 45 + rng() * 90,
+      color: PETALS[Math.floor(rng() * PETALS.length)],
+      p: rng() * Math.PI * 2, r: 16 + rng() * 10
+    });
+  }
+}
+const BUTTERFLIES = [];
+for (let i = 0; i < 3; i++) {
+  BUTTERFLIES.push({
+    x: 200 + rng() * 680, y: 500 + rng() * 900,
+    p: rng() * Math.PI * 2, s: 0.5 + rng() * 0.5,
+    color: ['#ffb703', '#80ed99', '#f72585'][i]
+  });
+}
+
+// --- State -----------------------------------------------------------------
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let score = 0;
+let caught = 0;
+let combo = 0;
+let comboTimer = 0;
+let elapsed = 0;
+let wingPhase = 0;
+const LEVEL = 3;
+
+const player = { x: START.x, y: START.y, r: 30, speed: 300, wp: 1, idle: 0 };
+const keys = {};
+let pointer = null;
+const particles = []; // sparkle bursts on every catch
+
+function spawnFirefly() {
+  return {
+    x: 140 + rng() * 800,
+    y: 200 + rng() * 1300,
+    phase: rng() * Math.PI * 2,
+    drift: 0.5 + rng() * 0.8,
+    r: 9 + rng() * 3,
+    trail: []
+  };
+}
+// Twenty-two fireflies now (day one had three); the first three spawn on
+// the same seeded spots as day one's, so the cuts match.
+const fireflies = [];
+for (let i = 0; i < 22; i++) fireflies.push(spawnFirefly());
+
+window.addEventListener('keydown', (e) => { keys[e.key.toLowerCase()] = true; player.idle = 0; });
+window.addEventListener('keyup', (e) => { keys[e.key.toLowerCase()] = false; });
+canvas.addEventListener('pointerdown', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  pointer = { x: (e.clientX - rect.left) * (W / rect.width), y: (e.clientY - rect.top) * (H / rect.height) };
+  player.idle = 0;
+});
+window.addEventListener('pointerup', () => { pointer = null; });
+window.addEventListener('pointermove', (e) => {
+  if (!pointer) return;
+  const rect = canvas.getBoundingClientRect();
+  pointer.x = (e.clientX - rect.left) * (W / rect.width);
+  pointer.y = (e.clientY - rect.top) * (H / rect.height);
+});
+
+function moveToward(tx, ty, dt) {
+  const dx = tx - player.x, dy = ty - player.y;
+  const d = Math.hypot(dx, dy);
+  if (d < 4) return true;
+  const step = Math.min(d, player.speed * dt);
+  player.x += (dx / d) * step;
+  player.y += (dy / d) * step;
+  return false;
+}
+
+function burst(x, y) {
+  for (let i = 0; i < 14; i++) {
+    const a = rng() * Math.PI * 2, sp = 60 + rng() * 160;
+    particles.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: 0.7 + rng() * 0.4, age: 0 });
+  }
+}
+
+function update(dt) {
+  elapsed += dt;
+  wingPhase += dt * 14;
+  if (comboTimer > 0) { comboTimer -= dt; if (comboTimer <= 0) combo = 0; }
+
+  player.idle += dt;
+  let driven = false;
+  let mx = 0, my = 0;
+  if (keys['arrowup'] || keys['w']) my -= 1;
+  if (keys['arrowdown'] || keys['s']) my += 1;
+  if (keys['arrowleft'] || keys['a']) mx -= 1;
+  if (keys['arrowright'] || keys['d']) mx += 1;
+  if (mx !== 0 || my !== 0) {
+    const len = Math.hypot(mx, my);
+    player.x += (mx / len) * player.speed * dt;
+    player.y += (my / len) * player.speed * dt;
+    driven = true;
+    player.idle = 0;
+  } else if (pointer) {
+    driven = moveToward(pointer.x, pointer.y, dt);
+    player.idle = 0;
+  }
+  if (!driven && player.idle > 0) {
+    const wp = WAYPOINTS[player.wp];
+    if (moveToward(wp.x, wp.y, dt)) player.wp = (player.wp + 1) % WAYPOINTS.length;
+  }
+  player.x = Math.max(70, Math.min(W - 70, player.x));
+  player.y = Math.max(70, Math.min(H - 70, player.y));
+
+  for (const f of fireflies) {
+    f.phase += dt * f.drift;
+    f.x += Math.cos(f.phase) * 22 * dt;
+    f.y += Math.sin(f.phase * 1.3) * 22 * dt;
+    f.trail.push({ x: f.x, y: f.y });
+    if (f.trail.length > 8) f.trail.shift();
+    if (Math.hypot(f.x - player.x, f.y - player.y) < player.r + f.r + 18) {
+      combo += 1;
+      comboTimer = 4;
+      score += 10 * Math.max(1, combo);
+      caught += 1;
+      burst(f.x, f.y);
+      const nf = spawnFirefly();
+      f.x = nf.x; f.y = nf.y; f.phase = nf.phase; f.drift = nf.drift; f.trail = [];
+    }
+  }
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.age += dt;
+    p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.96; p.vy *= 0.96;
+    if (p.age >= p.life) particles.splice(i, 1);
+  }
+  for (const b of BUTTERFLIES) {
+    b.p += dt * b.s;
+    b.x += Math.cos(b.p) * 26 * dt;
+    b.y += Math.sin(b.p * 1.7) * 20 * dt;
+  }
+}
+
+function drawField() {
+  // Night garden: deep teal-to-green gradient instead of one flat colour.
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#0a2e3d');
+  g.addColorStop(0.55, '#123f2a');
+  g.addColorStop(1, '#0c2f1a');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+
+  // Twinkling stars.
+  for (const s of STARS) {
+    ctx.globalAlpha = 0.35 + 0.65 * Math.abs(Math.sin(elapsed * s.s + s.p));
+    ctx.fillStyle = '#fff8d6';
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // Moon with a soft halo, top-left, below the HUD bar.
+  const moon = ctx.createRadialGradient(140, 270, 10, 140, 270, 130);
+  moon.addColorStop(0, 'rgba(255, 246, 200, 0.9)');
+  moon.addColorStop(0.25, 'rgba(255, 246, 200, 0.35)');
+  moon.addColorStop(1, 'rgba(255, 246, 200, 0)');
+  ctx.fillStyle = moon;
+  ctx.fillRect(0, 120, 320, 340);
+  ctx.fillStyle = '#fff3c4';
+  ctx.beginPath();
+  ctx.arc(140, 270, 52, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Fence: warm wood with posts now, not one flat line.
+  ctx.strokeStyle = '#8a5a33';
+  ctx.lineWidth = 12;
+  ctx.strokeRect(40, 40, W - 80, H - 80);
+  ctx.fillStyle = '#a06a3c';
+  for (let x = 40; x <= W - 40; x += 90) {
+    ctx.fillRect(x - 7, 28, 14, 44);
+    ctx.fillRect(x - 7, H - 72, 14, 44);
+  }
+
+  // Pond: moonlit water with drifting shine lines.
+  ctx.fillStyle = '#2f7ea8';
+  ctx.beginPath();
+  ctx.ellipse(POND.x, POND.y, POND.rx, POND.ry, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
+  ctx.lineWidth = 4;
+  for (let i = 0; i < 3; i++) {
+    const yy = POND.y - 45 + i * 45 + Math.sin(elapsed * 0.8 + i) * 6;
+    ctx.beginPath();
+    ctx.ellipse(POND.x, yy, 90 - i * 18, 10, 0, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  // Flower beds: soil mounds with glowing blossoms.
+  for (const b of BEDS) {
+    ctx.fillStyle = '#1d4a2a';
+    ctx.beginPath();
+    ctx.ellipse(b.x, b.y, 140, 85, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  for (const f of FLOWERS) {
+    const pulse = 0.75 + 0.25 * Math.sin(elapsed * 2 + f.p);
+    ctx.globalAlpha = pulse;
+    const glow = ctx.createRadialGradient(f.x, f.y, 2, f.x, f.y, f.r * 2.4);
+    glow.addColorStop(0, f.color);
+    glow.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(f.x, f.y, f.r * 2.4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = f.color;
+    for (let k = 0; k < 5; k++) {
+      const a = (k / 5) * Math.PI * 2 + f.p;
+      ctx.beginPath();
+      ctx.arc(f.x + Math.cos(a) * f.r * 0.55, f.y + Math.sin(a) * f.r * 0.55, f.r * 0.45, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.fillStyle = '#fff3c4';
+    ctx.beginPath();
+    ctx.arc(f.x, f.y, f.r * 0.3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Stone path, now with mossy edges and a soft lantern-lit tint.
+  for (let i = 0; i < 6; i++) {
+    ctx.fillStyle = '#7d7d6e';
+    ctx.fillRect(500 + (i % 2) * 40, 1380 - i * 170, 90, 60);
+    ctx.fillStyle = 'rgba(120, 180, 110, 0.5)';
+    ctx.fillRect(500 + (i % 2) * 40, 1380 - i * 170 + 48, 90, 12);
+  }
+}
+
+function drawFireflies() {
+  for (const f of fireflies) {
+    // Light trail.
+    for (let i = 0; i < f.trail.length; i++) {
+      const t = f.trail[i];
+      ctx.globalAlpha = (i / f.trail.length) * 0.35;
+      ctx.fillStyle = '#ffe66d';
+      ctx.beginPath();
+      ctx.arc(t.x, t.y, 4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    // Glow + bright core, pulsing.
+    const pulse = 0.8 + 0.2 * Math.sin(elapsed * 3 + f.phase);
+    const glow = ctx.createRadialGradient(f.x, f.y, 2, f.x, f.y, 34);
+    glow.addColorStop(0, 'rgba(255, 230, 109, 0.9)');
+    glow.addColorStop(1, 'rgba(255, 230, 109, 0)');
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(f.x, f.y, 34, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = pulse;
+    ctx.fillStyle = '#fff6b0';
+    ctx.beginPath();
+    ctx.arc(f.x, f.y, f.r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawButterflies() {
+  for (const b of BUTTERFLIES) {
+    const flap = Math.sin(wingPhase * 1.4 + b.p) * 0.7;
+    ctx.save();
+    ctx.translate(b.x, b.y);
+    ctx.fillStyle = b.color;
+    ctx.globalAlpha = 0.9;
+    ctx.beginPath();
+    ctx.ellipse(-8, -6 * flap - 2, 10, 14, -0.5, 0, Math.PI * 2);
+    ctx.ellipse(8, -6 * flap - 2, 10, 14, 0.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#2b2b2b';
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 4, 12, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawPlayer() {
+  // Lantern glow around the bug.
+  const glow = ctx.createRadialGradient(player.x, player.y, 10, player.x, player.y, 150);
+  glow.addColorStop(0, 'rgba(255, 190, 80, 0.55)');
+  glow.addColorStop(1, 'rgba(255, 190, 80, 0)');
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(player.x, player.y, 150, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Flapping wings.
+  const flap = Math.sin(wingPhase) * 8;
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.75)';
+  ctx.beginPath();
+  ctx.ellipse(player.x - 24, player.y - 18 - flap, 16, 9, -0.6, 0, Math.PI * 2);
+  ctx.ellipse(player.x + 24, player.y - 18 - flap, 16, 9, 0.6, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Amber lantern body with hot core.
+  ctx.fillStyle = '#f4a259';
+  ctx.beginPath();
+  ctx.arc(player.x, player.y, player.r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#ffe66d';
+  ctx.beginPath();
+  ctx.arc(player.x, player.y, player.r * 0.55, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Antennae + eyes.
+  ctx.strokeStyle = '#7c4a12';
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(player.x - 10, player.y - player.r + 4);
+  ctx.quadraticCurveTo(player.x - 18, player.y - player.r - 16, player.x - 26, player.y - player.r - 18);
+  ctx.moveTo(player.x + 10, player.y - player.r + 4);
+  ctx.quadraticCurveTo(player.x + 18, player.y - player.r - 16, player.x + 26, player.y - player.r - 18);
+  ctx.stroke();
+  ctx.fillStyle = '#1d1d1d';
+  ctx.beginPath();
+  ctx.arc(player.x - 10, player.y - 4, 5, 0, Math.PI * 2);
+  ctx.arc(player.x + 10, player.y - 4, 5, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    ctx.globalAlpha = 1 - p.age / p.life;
+    ctx.fillStyle = '#ffe66d';
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawHUD() {
+  // Full HUD bar: score, combo, level, timer, catches.
+  ctx.fillStyle = 'rgba(10, 25, 15, 0.72)';
+  ctx.beginPath();
+  ctx.roundRect(36, 36, W - 72, 150, 28);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255, 230, 109, 0.5)';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#ffe66d';
+  ctx.font = 'bold 54px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText('SKOR ' + score, 70, 95);
+
+  ctx.fillStyle = combo > 1 ? '#ff7ad9' : '#ffffff';
+  ctx.font = 'bold 44px sans-serif';
+  ctx.fillText(combo > 1 ? 'KOMBO x' + combo : 'KOMBO x1', 70, 152);
+
+  ctx.fillStyle = '#8ecae6';
+  ctx.textAlign = 'right';
+  ctx.font = 'bold 44px sans-serif';
+  ctx.fillText('LEVEL ' + LEVEL, W - 70, 95);
+  const mins = Math.floor(elapsed / 60);
+  const secs = Math.floor(elapsed % 60);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText((mins < 10 ? '0' : '') + mins + ':' + (secs < 10 ? '0' : '') + secs, W - 70, 152);
+
+  // Catches pill, bottom-left.
+  ctx.fillStyle = 'rgba(10, 25, 15, 0.72)';
+  ctx.beginPath();
+  ctx.roundRect(36, H - 130, 340, 84, 42);
+  ctx.fill();
+  ctx.fillStyle = '#ffe66d';
+  ctx.font = 'bold 44px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText('✦ ' + caught + ' ditangkap', 66, H - 88);
+}
+
+function draw() {
+  drawField();
+  drawFireflies();
+  drawButterflies();
+  drawPlayer();
+  drawParticles();
+  drawHUD();
+}
+
+// Fixed timestep so the game plays the same at any frame rate.
+let last = performance.now();
+let acc = 0;
+const STEP = 1 / 60;
+function frame(now) {
+  acc += Math.min(0.1, (now - last) / 1000);
+  last = now;
+  while (acc >= STEP) { update(STEP); acc -= STEP; }
+  draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

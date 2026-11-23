@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<title>Glow Garden — Hari 1</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #0a1f10; overflow: hidden; }
+  canvas { display: block; width: 1080px; height: 1920px; }
+</style>
+</head>
+<body>
+<canvas id="game" width="1080" height="1920"></canvas>
+<script>
+'use strict';
+// Glow Garden — day-one build (HARI 1).
+// A tiny canvas arcade game: steer a little lantern bug around a fixed
+// garden map and catch fireflies. Day 1 is deliberately bare: flat field,
+// three dim fireflies, a grey player dot, one small score line. Same map,
+// same start and same camera as the day-seven build — the map never moves.
+// Playable: WASD / arrow keys, or drag with mouse / touch. When idle the
+// bug follows a scripted patrol so footage can be captured hands-free.
+
+// --- Seeded RNG (deterministic: the same seed drives both builds) -------
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const rng = mulberry32(20261123);
+
+// --- Map (identical in both builds) --------------------------------------
+const W = 1080, H = 1920;
+const START = { x: 540, y: 1500 };
+const POND = { x: 850, y: 300, rx: 170, ry: 110 };
+const BEDS = [ { x: 220, y: 520 }, { x: 860, y: 700 }, { x: 300, y: 1150 } ];
+const WAYPOINTS = [
+  { x: 540, y: 1500 }, { x: 300, y: 1100 }, { x: 700, y: 900 },
+  { x: 880, y: 500 }, { x: 400, y: 420 }, { x: 540, y: 1500 },
+  { x: 800, y: 1300 }, { x: 250, y: 800 }
+];
+
+// --- State -----------------------------------------------------------------
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let score = 0;
+let caught = 0;
+let elapsed = 0;
+
+const player = { x: START.x, y: START.y, r: 26, speed: 260, wp: 1, idle: 0 };
+const keys = {};
+let pointer = null; // {x, y} while dragging, else null
+
+function spawnFirefly() {
+  // Same seeded sequence as the day-seven build: its first three
+  // fireflies start on exactly these spots.
+  return {
+    x: 140 + rng() * 800,
+    y: 200 + rng() * 1300,
+    phase: rng() * Math.PI * 2,
+    drift: 0.4 + rng() * 0.6,
+    r: 9
+  };
+}
+const fireflies = [spawnFirefly(), spawnFirefly(), spawnFirefly()];
+
+window.addEventListener('keydown', (e) => { keys[e.key.toLowerCase()] = true; player.idle = 0; });
+window.addEventListener('keyup', (e) => { keys[e.key.toLowerCase()] = false; });
+canvas.addEventListener('pointerdown', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  pointer = { x: (e.clientX - rect.left) * (W / rect.width), y: (e.clientY - rect.top) * (H / rect.height) };
+  player.idle = 0;
+});
+window.addEventListener('pointerup', () => { pointer = null; });
+window.addEventListener('pointermove', (e) => {
+  if (!pointer) return;
+  const rect = canvas.getBoundingClientRect();
+  pointer.x = (e.clientX - rect.left) * (W / rect.width);
+  pointer.y = (e.clientY - rect.top) * (H / rect.height);
+});
+
+function moveToward(tx, ty, dt) {
+  const dx = tx - player.x, dy = ty - player.y;
+  const d = Math.hypot(dx, dy);
+  if (d < 4) return true;
+  const step = Math.min(d, player.speed * dt);
+  player.x += (dx / d) * step;
+  player.y += (dy / d) * step;
+  return false;
+}
+
+function update(dt) {
+  elapsed += dt;
+  player.idle += dt;
+
+  // Human input wins; otherwise the scripted patrol drives the bug.
+  let driven = false;
+  let mx = 0, my = 0;
+  if (keys['arrowup'] || keys['w']) my -= 1;
+  if (keys['arrowdown'] || keys['s']) my += 1;
+  if (keys['arrowleft'] || keys['a']) mx -= 1;
+  if (keys['arrowright'] || keys['d']) mx += 1;
+  if (mx !== 0 || my !== 0) {
+    const len = Math.hypot(mx, my);
+    player.x += (mx / len) * player.speed * dt;
+    player.y += (my / len) * player.speed * dt;
+    driven = true;
+    player.idle = 0;
+  } else if (pointer) {
+    driven = moveToward(pointer.x, pointer.y, dt);
+    player.idle = 0;
+  }
+  if (!driven && player.idle > 0) {
+    const wp = WAYPOINTS[player.wp];
+    if (moveToward(wp.x, wp.y, dt)) player.wp = (player.wp + 1) % WAYPOINTS.length;
+  }
+  player.x = Math.max(70, Math.min(W - 70, player.x));
+  player.y = Math.max(70, Math.min(H - 70, player.y));
+
+  for (const f of fireflies) {
+    f.phase += dt * f.drift;
+    f.x += Math.cos(f.phase) * 12 * dt;
+    f.y += Math.sin(f.phase * 1.3) * 12 * dt;
+    if (Math.hypot(f.x - player.x, f.y - player.y) < player.r + f.r + 16) {
+      score += 10;
+      caught += 1;
+      const nf = spawnFirefly();
+      f.x = nf.x; f.y = nf.y; f.phase = nf.phase; f.drift = nf.drift;
+    }
+  }
+}
+
+function drawField() {
+  // Day 1: one flat dark green, nothing else.
+  ctx.fillStyle = '#1d3a24';
+  ctx.fillRect(0, 0, W, H);
+
+  // Fence border, plain brown line.
+  ctx.strokeStyle = '#6b4a2b';
+  ctx.lineWidth = 10;
+  ctx.strokeRect(40, 40, W - 80, H - 80);
+
+  // Pond: flat blue ellipse, no shine.
+  ctx.fillStyle = '#2a5a7a';
+  ctx.beginPath();
+  ctx.ellipse(POND.x, POND.y, POND.rx, POND.ry, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Flower beds: flat darker patches, no flowers yet.
+  ctx.fillStyle = '#16301c';
+  for (const b of BEDS) {
+    ctx.beginPath();
+    ctx.ellipse(b.x, b.y, 130, 80, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Stone path: a few flat grey slabs from the start toward the pond.
+  ctx.fillStyle = '#5a5a52';
+  for (let i = 0; i < 6; i++) {
+    ctx.fillRect(500 + (i % 2) * 40, 1380 - i * 170, 90, 60);
+  }
+}
+
+function draw() {
+  drawField();
+
+  // Fireflies: dim yellow dots, no glow, no trail.
+  for (const f of fireflies) {
+    ctx.fillStyle = '#c9b458';
+    ctx.beginPath();
+    ctx.arc(f.x, f.y, f.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Player: a plain grey circle with two eyes. That is the whole bug.
+  ctx.fillStyle = '#8a8a8a';
+  ctx.beginPath();
+  ctx.arc(player.x, player.y, player.r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#111111';
+  ctx.beginPath();
+  ctx.arc(player.x - 9, player.y - 6, 4, 0, Math.PI * 2);
+  ctx.arc(player.x + 9, player.y - 6, 4, 0, Math.PI * 2);
+  ctx.fill();
+
+  // HUD, day 1: one small score line, nothing else.
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '44px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  ctx.fillText('SKOR ' + score, 70, 80);
+}
+
+// Fixed timestep so the game plays the same at any frame rate.
+let last = performance.now();
+let acc = 0;
+const STEP = 1 / 60;
+function frame(now) {
+  acc += Math.min(0.1, (now - last) / 1000);
+  last = now;
+  while (acc >= STEP) { update(STEP); acc -= STEP; }
+  draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
